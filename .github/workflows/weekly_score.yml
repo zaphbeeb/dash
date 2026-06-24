@@ -1,0 +1,51 @@
+name: Weekly AIHI Scorer
+
+# Controls when the workflow runs
+on:
+  # 1) Scheduled trigger: Every Friday at 21:00 UTC
+  #    This is 4:00 PM EST / 1:00 PM PST (after US market closes on Friday)
+  schedule:
+    - cron: '0 21 * * 5'
+  
+  # 2) Manual trigger: Allows you to click "Run workflow" from the GitHub UI
+  workflow_dispatch:
+
+# Give the default GITHUB_TOKEN permission to write to the repository
+permissions:
+  contents: write
+
+jobs:
+  run-scorer:
+    runs-on: ubuntu-latest
+    
+    steps:
+      # Step 1: Pull the latest code from the repository
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2: Set up Python environment
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Step 3: Install all required dependencies
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Step 4: Run the scoring engine
+      # This will generate a file like data/weekly_20260624.json
+      - name: Run AIHI Scorer
+        run: python score_engine.py
+
+      # Step 5: Commit and push the new JSON file back to the repo
+      - name: Commit and push results
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/
+          # Only commit if there is actually a change (e.g., new weekly file)
+          git diff --staged --quiet || git commit -m "Weekly AIHI score update ($(date +'%Y-%m-%d'))"
+          git push
