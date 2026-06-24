@@ -1,41 +1,81 @@
 import yfinance as yf
-import requests
-from bs4 import BeautifulSoup
+import pandas as pd
+from datetime import datetime
 import json
-from datetime import datetime, timedelta
+import os
 
 class AIHIScorer:
     def __init__(self):
+        # Define all tickers we need
         self.hyperscalers = ["AMZN", "MSFT", "GOOGL", "META"]
         self.semis = ["NVDA"]
-        self.memory = ["MU", "SKHYF"]  # SK Hynix ADR
+        self.memory = ["MU"]          # Micron is the best US-traded HBM proxy
         self.energy = ["CEG", "VST"]
         self.dc_reits = ["DLR", "EQIX"]
+        
+        # Combine and deduplicate
+        self.all_tickers = list(set(
+            self.hyperscalers + self.semis + self.memory + self.energy + self.dc_reits
+        ))
+        
+        # Cache for batch data (stored per instance run)
+        self._price_cache = None
 
-    def get_stock_momentum(self, ticker):
-        """Fetches 20-day and 200-day MA to gauge momentum."""
-        stock = yf.Ticker(ticker)
-        hist = stock.history(period="6mo")
-        if len(hist) < 200:
-            return 0
-        last_close = hist['Close'].iloc[-1]
-        ma_20 = hist['Close'].rolling(20).mean().iloc[-1]
-        ma_200 = hist['Close'].rolling(200).mean().iloc[-1]
-        # If price > 200MA, bullish. If below, bearish.
+    def _fetch_all_prices(self, period="6mo"):
+        """
+        Fetch ALL required tickers in a single batch request.
+        This prevents yfinance throttling (1 call vs 11+ calls).
+        """
+        if self._price_cache is not None:
+            return self._price_cache
+
+        try:
+            # group_by='ticker' returns a dict: { 'NVDA': DataFrame, 'AMZN': DataFrame, ... }
+            data = yf.download(
+                tickers=self.all_tickers,
+                period=period,
+                group_by='ticker',
+                auto_adjust=True,
+                threads=True,          # Parallelize download internally
+                progress=False         # Keep logs clean
+            )
+            self._price_cache = data
+            return data
+        except Exception as e:
+            print(f"⚠️ Batch download failed: {e}")
+            return {}
+
+    # ---------- Helper metrics from batch data ----------
+    def _get_stock_momentum(self, ticker):
+        """Relative strength vs 200-day moving average."""
+        data = self._fetch_all_prices()
+        if ticker not in data or data[ticker].empty or len(data[ticker]) < 200:
+            return 0.0
+        df = data[ticker]
+        last_close = df['Close'].iloc[-1]
+        ma_200 = df['Close'].rolling(200).mean().iloc[-1]
+        if pd.isna(ma_200) or ma_200 == 0:
+            return 0.0
         return (last_close / ma_200) - 1
 
+    def _get_monthly_change(self, ticker):
+        """1-month price performance (approx 21 trading days)."""
+        data = self._fetch_all_prices()
+        if ticker not in data or data[ticker].empty or len(data[ticker]) < 21:
+            return 0.0
+        df = data[ticker]
+        return (df['Close'].iloc[-1] / df['Close'].iloc[-21]) - 1
+
+    # ---------- PILLAR SCORING (0 to 100) ----------
     def pillar_1_guidance(self):
-        """Scrape sentiment from latest 10-Q filings via SEC API."""
-        # Simplified: Use a placeholder - In production, pull from SEC EDGAR.
-        # We check for specific bearish phrases.
-        bearish_phrases = ["digestion", "prioritization", "deceleration", "efficiency"]
-        # Simulate a sentiment count from recent news/filings
-        # Assume we parsed text and counted occurrences.
-        # Score logic: 0 occurrences = 0; 1-2 = 25; 3-4 = 50; 5+ = 100
-        # For demo, returning a dynamic value based on current date/week.
+        """
+        [30% weight] Hyperscaler Capex Guidance.
+        In production: parse SEC 10-Q/earnings calls.
+        For demo, we use a simulated sentiment based on week of year.
+        """
         week = datetime.now().isocalendar()[1]
-        # Simulate cycle: Weeks 1-10 growth, 20-30 plateau, 40-52 collapse.
-        if week < 10:
+        # Simulate cycle: Q1 growth, Q3 plateau, Q4 slowdown
+        if week < 12:
             return 0
         elif week < 30:
             return 50
@@ -43,59 +83,68 @@ class AIHIScorer:
             return 80
 
     def pillar_2_backlog(self):
-        """NVDA backlog via 10-Q purchase obligations."""
-        # Real implementation parses NVDA's 10-Q. Simulate with stock momentum.
-        nvda_momentum = self.get_stock_momentum("NVDA")
-        if nvda_momentum > 0.15:  # Strong growth
+        """
+        [25% weight] NVDA backlog / lead times.
+        Using NVDA's price momentum vs 200MA as a proxy for order health.
+        """
+        nvda_mom = self._get_stock_momentum("NVDA")
+        if nvda_mom > 0.15:      # Strongly above 200MA -> backlog expanding
             return 0
-        elif nvda_momentum > -0.10:
+        elif nvda_mom > -0.10:   # Near 200MA -> plateau
             return 50
-        else:
+        else:                    # Below 200MA -> backlog compressing
             return 100
 
     def pillar_3_memory(self):
-        """HBM pricing simulation."""
-        # In reality, scrape DRAMeXchange. Simulate using MU stock performance.
-        mu = yf.Ticker("MU")
-        hist = mu.history(period="1mo")
-        if len(hist) < 2:
-            return 50
-        pct_change = (hist['Close'].iloc[-1] / hist['Close'].iloc[0]) - 1
-        if pct_change > 0.10:
+        """
+        [15% weight] HBM/DRAM pricing.
+        Using MU's 1-month change as proxy for spot/contract pricing.
+        """
+        mu_change = self._get_monthly_change("MU")
+        if mu_change > 0.10:      # Prices up >10% -> bottleneck remains
             return 0
-        elif pct_change > -0.05:
+        elif mu_change > -0.05:   # Flat to slight down -> plateau
             return 50
-        else:
+        else:                     # Crash >5% -> oversupply / demand drop
             return 100
 
     def pillar_4_datacenter(self):
-        """Vacancy and Capex/Revenue ratio."""
-        # Simplified: Track hyperscaler price performance vs. REITs.
-        dc_avg = sum([self.get_stock_momentum(t) for t in self.dc_reits]) / len(self.dc_reits)
-        hyp_avg = sum([self.get_stock_momentum(t) for t in self.hyperscalers]) / len(self.hyperscalers)
-        # If hyperscalers outperform REITs, they are spending heavily (0). If REITs outperform, demand is weak (100).
-        ratio = hyp_avg - dc_avg
-        if ratio > 0.20:
+        """
+        [15% weight] Data center vacancy & capex/revenue ratio.
+        We compare Hyperscaler momentum vs REIT momentum.
+        If hyperscalers outperform REITs, they are spending heavily (0).
+        If REITs outperform, demand is weakening (100).
+        """
+        hyp_avg = sum([self._get_stock_momentum(t) for t in self.hyperscalers]) / len(self.hyperscalers)
+        reit_avg = sum([self._get_stock_momentum(t) for t in self.dc_reits]) / len(self.dc_reits)
+        spread = hyp_avg - reit_avg
+
+        if spread > 0.20:
             return 0
-        elif ratio > -0.10:
+        elif spread > -0.10:
             return 50
         else:
             return 100
 
     def pillar_5_energy(self):
-        """Energy is structurally late. If energy outperforms semis, it's a plateau (50). If it crashes hard, collapse (100)."""
-        energy_avg = sum([self.get_stock_momentum(t) for t in self.energy]) / len(self.energy)
-        semi_mom = self.get_stock_momentum("NVDA")
+        """
+        [15% weight] Power/Energy – structurally last to break.
+        If Energy outperforms Semis -> rotation to safety (Plateau = 50).
+        If Energy crashes with Semis -> total collapse (100).
+        """
+        energy_avg = sum([self._get_stock_momentum(t) for t in self.energy]) / len(self.energy)
+        semi_mom = self._get_stock_momentum("NVDA")
         spread = energy_avg - semi_mom
-        if spread > 0.20:  # Energy is safe-haven -> plateau
+
+        if spread > 0.20:        # Energy is the safe haven -> plateau confirmed
             return 50
-        elif spread > -0.15:
-            return 20  # Still growing
-        else:  # Energy crashing with semis -> collapse
+        elif spread > -0.15:     # Normal growth spread
+            return 20
+        else:                    # Energy crashing too -> structural collapse
             return 100
 
     def compute_weekly_score(self):
-        """Run all pillars and compute the final 0-100 index."""
+        """Calculate final 0-100 AI Health Index (AIHI)."""
         p1 = self.pillar_1_guidance()
         p2 = self.pillar_2_backlog()
         p3 = self.pillar_3_memory()
@@ -103,19 +152,37 @@ class AIHIScorer:
         p5 = self.pillar_5_energy()
 
         weights = [0.30, 0.25, 0.15, 0.15, 0.15]
-        final_score = (p1*weights[0] + p2*weights[1] + p3*weights[2] + 
-                       p4*weights[3] + p5*weights[4])
+        final_score = (
+            p1 * weights[0] +
+            p2 * weights[1] +
+            p3 * weights[2] +
+            p4 * weights[3] +
+            p5 * weights[4]
+        )
+
         return {
             "date": datetime.now().strftime("%Y-%m-%d"),
             "AIHI": round(final_score, 2),
-            "pillars": {"Guidance": p1, "Backlog": p2, "Memory": p3, 
-                        "DataCenter": p4, "Energy": p5}
+            "pillars": {
+                "Guidance (Capex)": p1,
+                "Backlog (NVDA)": p2,
+                "Memory (HBM)": p3,
+                "Data Center": p4,
+                "Energy (Lag)": p5
+            }
         }
 
-# For weekly cron job
+
+# ----- Standalone runner for weekly CRON job -----
 if __name__ == "__main__":
     scorer = AIHIScorer()
     result = scorer.compute_weekly_score()
-    with open(f"data/weekly_{datetime.now().strftime('%Y%m%d')}.json", "w") as f:
-        json.dump(result, f)
-    print(f"Weekly AIHI Score: {result['AIHI']}")
+    
+    # Ensure data folder exists
+    os.makedirs("data", exist_ok=True)
+    
+    filename = f"data/weekly_{datetime.now().strftime('%Y%m%d')}.json"
+    with open(filename, "w") as f:
+        json.dump(result, f, indent=4)
+    
+    print(f"✅ Weekly AIHI Score: {result['AIHI']} saved to {filename}")
