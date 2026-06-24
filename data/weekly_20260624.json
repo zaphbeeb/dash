@@ -1,0 +1,11 @@
+{
+    "date": "2026-06-24",
+    "AIHI": 38.0,
+    "pillars": {
+        "Guidance (Capex)": 50,
+        "Backlog (NVDA)": 50,
+        "Memory (HBM)": 0,
+        "Data Center": 50,
+        "Energy (Lag)": 20
+    }
+}
