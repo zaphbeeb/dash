@@ -1,0 +1,18 @@
+{
+    "date": "2026-06-26",
+    "AIHI": 18.0,
+    "pillars": {
+        "Guidance (Capex)": 0,
+        "Backlog (NVDA)": 0,
+        "Memory (HBM)": 0,
+        "Data Center": 100,
+        "Energy (Lag)": 20
+    },
+    "meta": {
+        "p1_gap": "computed",
+        "p2_rev_growth": "computed",
+        "p3_mu_gm": "computed",
+        "p4_capex_rev_ratio": "computed",
+        "p5_energy_spread": "computed"
+    }
+}
